@@ -1,149 +1,146 @@
 import os
-import warnings
 from tsfeatures import *
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
-from sklearn.impute import KNNImputer
-from pathlib import Path
+from typing import Tuple
+import logging
 
-def import_data_chp(csv_file_path: Path):
-    """Import the CHP data from a csv file
+logging.basicConfig(level=logging.INFO)
 
-    Args:
-        csv_file_path (the path of the csv file): this is already provided in the __init__() as ../Data/
-
-    Returns:
-        chp (DataFrame): A Dataframe with, for each CHP, the output, forecasted output and capacity
-        production (DataFrame): A Dataframe containing only the output for each CHP, to be used for our models
-    """
-    # Read the CSV file
-    chp = pd.read_csv(csv_file_path, index_col='Date', low_memory=False)
-    # Create a multi-index column
-    header_values = chp.columns
-    locations = header_values[0::3]
-    metrics = ['Installed Capacity NCNR MW', 'NCNR production Forecast IntraDay MW', 'NCNR production MW']
-    header = pd.MultiIndex.from_product([locations, metrics])
-    chp.columns = header
-    chp = chp[1:]
-    chp = chp.astype(float)  # The values are all read as strings, so we need to adjust all of them to floats
-    chp.drop(columns=['1680'], inplace=True)  # This CHP has no output for the entire period
-    # Create a new datetime index
-    new_datetime_index = pd.date_range(start='01-01-2021 00:00:00', end='13-05-2023 23:00:00', freq='H')
-    # Reindex the DataFrame with the new datetime index
-    chp.index = new_datetime_index
-    # Get only the production values
-    production = chp.xs('NCNR production MW', level=1, axis=1)
-
-    return chp, production
-
-def preprocess_and_plot(production):
-    """Preprocess the data and generate missing value plots."""
-    production.index.name = 'timestamp'
-    production.columns.names = ['unique_id']
-
-    df_plot = production.resample('D').mean()
-    df_plot.index = df_plot.index.astype('str')
-    df_plot = ~df_plot.isna().T
-    df_plot = df_plot.sort_index()
-
-    plt.figure(figsize=(5, 4))
-    ax = sns.heatmap(df_plot, vmin=0, vmax=1, cbar=False)
-    ax.set_title('Missing data in CHP dataset.')
-
-    image_path = os.path.join(images_dir, 'missing_data_heatmap_chp.png')
-    plt.savefig(image_path)
-
-    # Format the data into the Nixtla format and drop buildings 
-    production_reset = production.reset_index()
-    melted_production = pd.melt(production_reset, id_vars=['timestamp'], value_vars=production_reset.columns[1:], var_name='unique_id', value_name='y')
-    melted_production['timestamp'] = pd.to_datetime(melted_production['timestamp'])
-    melted_production = melted_production[['unique_id', 'timestamp', 'y']]
-
-    # Filter out rows with specified unique_id values
-    exclude_ids = [1680, 31574, 3859, 34]
-    melted_production = melted_production[~melted_production['unique_id'].isin(exclude_ids)]
-
-    # Remove unique_id with more than 40% missing values
-    missing_threshold = 40
-    missing_perc = pd.DataFrame(melted_production.groupby(['unique_id'])['y'].apply(lambda x: float(x.isnull().sum() / len(x) * 100))).rename({'y': 'missing_percentage'}, axis=1)
-    index_missing = missing_perc[missing_perc.missing_percentage >= missing_threshold].index.tolist()
-    melted_production = melted_production.loc[~melted_production['unique_id'].isin(index_missing)]
-
-    # Remove rows corresponding to days with all hours having 'y' value of 0, and/or with all hours having same 'y' value
-    melted_production['timestamp'] = pd.to_datetime(melted_production['timestamp'])
-    melted_production['date'] = melted_production['timestamp'].dt.date
-
-    days_with_all_same = melted_production.groupby(['unique_id', 'date'])['y'].nunique().eq(1).reset_index()
-    days_all_same = days_with_all_same[days_with_all_same['y']]
-
-    filtered_production = melted_production[~melted_production.set_index(['unique_id', 'date']).index.isin(days_all_same.set_index(['unique_id', 'date']).index)]
-    filtered_production = filtered_production.drop(columns=['date'])
-
-    # Impute missing values
-    columns_to_impute = ['y']
-    imputer = KNNImputer()
-
-    def impute_group(group):
-        group[columns_to_impute] = imputer.fit_transform(group[columns_to_impute])
-        return group
-
-    imputed_production = filtered_production.groupby('unique_id').apply(impute_group)
-    imputed_production.reset_index(drop=True, inplace=True)
-
-    return imputed_production
-
-def save_clean_production(imputed_production, output_dir:str):
-    """Save the clean version of the dataset."""
-    output_path = os.path.join(output_dir, 'clean_production.parquet')
-    imputed_production.to_parquet(output_path)
-
-def extract_chp_features(dataset: pd.DataFrame):
-    """Extract Nixtla features from time series data."""
-
-    warnings.filterwarnings("ignore")
-
-    file_path = Path(f"./data/features/nixtla_features_chp.parquet")
-
-    if file_path.exists():
-        print(f"Dataset {dataset} has been processed already.")
-        return
-
-    print(f"Processing dataset: {dataset}")
-    try:
-        features = tsfeatures(dataset, freq=24)
-
-        # Save features
-        print(f"Extracted {len(features)} from site {dataset}.")
-        features.to_parquet(file_path, index=False)
-      
-    except Exception as e:
-        print(f"Error happened while feature extraction for dataset {dataset}, {e}")
-        raise e
+def calculate_data_quality_metrics(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """Calculate missing, null percentages, and duration."""
+    missing_perc = df.groupby(['unique_id'])['y'].apply(lambda x: float(x.isnull().sum()/ len(x)*100))
+    null_perc = df.groupby(['unique_id'])['y'].apply(lambda x: (x == 0.00).astype(int).sum(axis=0)/len(x)*100)
     
-def main():
-    # Import data
-    csv_file_path = Path("./data/raw/chp/CHPsData2021_2023.csv")
-    chp, production = import_data_chp(csv_file_path)
+    if not isinstance(df['timestamp'], pd.DatetimeIndex):
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+    
+    duration = (df.groupby(['unique_id'])['timestamp'].apply(lambda x: (x.max() - x.min()).days)
+                .astype(int))
 
-    # Preprocess data and generate plots
-    imputed_production = preprocess_and_plot(production)
+    return missing_perc, null_perc, duration
 
-    # Save clean production data
-    output_dir = Path("./data/raw/chp/")
-    save_clean_production(imputed_production, output_dir)
+def visualize_data_quality(missing_perc: pd.Series, null_perc: pd.Series, duration: pd.Series, dataset_name: str):
+    """Plot data quality metrics."""
+    fig, axes = plt.subplots(3, 1, figsize=(10, 15))
 
-    print("Preprocessing and saving completed.")
+    # Plot missing percentage
+    missing_perc.sort_values(ascending=False).head(25).plot(kind="barh", ax=axes[0])
+    axes[0].invert_yaxis()
+    axes[0].set_title(f'Top 25 buildings with highest missing percentage ({dataset_name})')
+    axes[0].set_xlabel('Missing Percentage (%)')
 
-    # Extract Nixtla features
-    extract_chp_features(imputed_production)
+    # Plot null percentage
+    null_perc.sort_values(ascending=False).head(25).plot(kind="barh", ax=axes[1])
+    axes[1].invert_yaxis()
+    axes[1].set_title(f'Top 25 buildings with highest null percentage ({dataset_name})')
+    axes[1].set_xlabel('Null Percentage (%)')
 
-    print("Feature extraction and saving completed.")
+    # Plot duration
+    duration.sort_values(ascending=True).head(25).plot(kind="barh", ax=axes[2])
+    axes[2].invert_yaxis()
+    axes[2].set_title(f'Top 25 buildings with lowest observed timespan ({dataset_name})')
+    axes[2].set_xlabel('Observed timespan (days)')
 
+    plt.tight_layout()
+    plt.show()
+
+def drop_buildings(df: pd.DataFrame, missing_perc: pd.Series, null_perc: pd.Series, duration: pd.Series) -> pd.DataFrame:
+    """Drop buildings with more than 50% missing values, more than 99% null values, or less than 30 days of readings."""
+    index_missing = missing_perc[missing_perc >= 50].index 
+    index_null = null_perc[null_perc >= 99].index  
+    index_duration = duration[duration < 30].index
+    indices = index_duration.append([index_null, index_missing]).drop_duplicates().tolist()
+    logging.info("Buildings are dropped based on data quality metrics.")
+    return df[~df['unique_id'].isin(indices)]
+
+def impute_missing_with_weekly_median(df: pd.DataFrame) -> pd.DataFrame:
+    """Impute missing values with the median values of the daily usage profile of each day of the week for each household."""
+    if df['y'].isnull().any():
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df['day_of_week'] = df['timestamp'].dt.day_name()
+        median_profiles = df.groupby(['unique_id', 'day_of_week'])['y'].transform('median')
+        df['y'] = df['y'].fillna(median_profiles)
+        df.drop(columns=['day_of_week'], inplace=True)
+        logging.info('Missing values are imputed.')
+    else:  
+        logging.info('There is no need for imputation.')
+    
+    return df
+
+def detect_consecutive_days_with_same_value(df: pd.DataFrame) -> pd.Index:
+    """Detect consecutive days with the same value."""
+    df['date'] = df['timestamp'].dt.date
+    daily_counts = df.groupby(['unique_id', 'date'])['y'].nunique()
+    consecutive_days = daily_counts[daily_counts == 1]
+    indices_to_remove = df[df.set_index(['unique_id', 'date']).index.isin(consecutive_days.index)].index
+    return indices_to_remove
+
+def process_data(df: pd.DataFrame, dataset_name: str) -> None:
+    """Process data for a given dataset."""
+    # Calculate data quality metrics
+    missing_perc, null_perc, duration = calculate_data_quality_metrics(df)
+    # Visualize data quality
+    visualize_data_quality(missing_perc, null_perc, duration, dataset_name)
+    # Drop buildings based on data quality metrics
+    df_processed = drop_buildings(df, missing_perc, null_perc, duration)
+    # Impute missing values
+    df_processed = impute_missing_with_weekly_median(df_processed)
+    # Remove the rows corresponding to the consecutive days with the same value for each unique ID 
+    indices_to_remove = detect_consecutive_days_with_same_value(df_processed)
+    df_processed = df_processed.drop(indices_to_remove)
+    logging.info("Rows corresponding to days with the consecutive same value are removed.")
+
+def extract_features(path: str, dataset_name: str, freq: int) -> pd.DataFrame:
+    """Extract features for a given dataset."""
+    logging.info(f"Reading data from file: {path}")
+    if dataset_name == 'fluvius':
+        df = pd.read_csv(path, delimiter=';', encoding='utf-8')
+        df = df.reset_index(drop=True)
+        logging.info("Performing additional transformations for 'fluvius' dataset...")
+        df.rename(columns={'EAN_ID': 'unique_id', 'Datum_Startuur': 'timestamp', 'Volume_Afname_kWh': 'y'}, inplace=True)
+        df['timestamp'] = pd.to_datetime(df['timestamp'].str[:-1], format='%Y-%m-%dT%H:%M:%S.%f')
+        df.drop(['Volume_Injectie_kWh', 'Warmtepomp_Indicator', 'Elektrisch_Voertuig_Indicator', 'PV-Installatie_Indicator', 'Datum', 'Contract_Categorie', 'Class_Name'], axis=1, inplace=True)
+        df
+    else:
+        df = pd.read_parquet(path)
+        df = df.reset_index(drop=True)
+
+    if 'stdorToU' in df.columns:
+        df = df.drop('stdorToU', axis=1)
+    if 'ds' in df.columns:
+        df = df.rename(columns={"ds": "timestamp"})
+    if 'LCLid' in df.columns:
+        df = df.rename(columns={"LCLid": "unique_id"})
+    if 'DateTime' in df.columns:
+        df = df.rename(columns={"DateTime": "timestamp"})
+    if 'KWH/hh (per half hour) ' in df.columns:
+        df = df.rename(columns={"KWH/hh (per half hour) ": "y"})
+    #df['unique_id'] = pd.to_numeric(df['unique_id'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit="s")
+    df['y'] = pd.to_numeric(df['y'])
+    logging.info(df.info())
+    logging.info("Pre-processing the dataset...")
+    process_data(df, dataset_name)
+    logging.info("Performing feature extraction...")
+    features = tsfeatures(df, freq=freq)
+    logging.info("Feature extraction completed.")
+    return features
+
+def process_features(dataset_name: str, path: str, freq: int, output_path: str) -> None:
+    """Process features for a given dataset."""
+    logging.info(f"Processing {dataset_name} features...")
+    features = extract_features(path, dataset_name, freq)
+    features.to_parquet(output_path)
+    logging.info(f"{dataset_name} features processed successfully.")
 
 if __name__ == "__main__":
-    # Create images directory if it doesn't exist
-    images_dir = Path("./images/")
-    images_dir.mkdir(parents=True, exist_ok=True)
+    process_features("London", "./data/raw/london/CC_LCL-FullData.parquet", 48, "./data/features/nixtla_features_london.parquet")
+    process_features("Australia", "./data/raw/australia/Australia.parquet", 48, "./data/features/nixtla_features_australia.parquet")
+    process_features("BDG2", "./data/raw/bdg2/BDG2_clean.parquet", 24, "./data/features/nixtla_features_bdg2.parquet")
+    process_features("CHP", "./data/raw/chp/clean_production.parquet", 24, "./data/features/nixtla_features_chp.parquet")
+    ###process_features("Ireland", "./data/raw/", ??, "./data/features/nixtla_features_irish.parquet")
+    process_features("Fluvius", "./data/raw/fluvius/P6269_1_50_DMK_Sample_Elek.csv", 96, "./data/features/nixtla_features_fluvius.parquet")
 
-    main()
+
