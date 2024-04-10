@@ -177,6 +177,14 @@ def extract_chp_features(path: str, parallel: bool):
     else:
         process_one_by_one(df, "chp", freq="1H")
 
+def extract_fluvius_features(path: str, parallel: bool):
+    df = pd.read_parquet(path)
+
+    if parallel:
+        process_parallel(df, "fluvius",freq="15T")
+    else:
+        process_one_by_one(df, "fluvius", freq="15T")
+
 
 def merge_features(dataset: str) -> pd.DataFrame:
     files = glob(f"./data/features/{dataset}/ifeel_features_*.csv")
@@ -211,10 +219,15 @@ def process_chp_features(parallel: bool):
     extract_chp_features("./data/raw/chp/clean_production.parquet", parallel)  
     merge_features("chp").to_parquet("./data/features/ifeel_features_chp.parquet")    
 
+def process_fluvius_features(parallel: bool):
+    extract_fluvius_features("./data/raw/fluvius/fluvius.parquet", parallel)  
+    merge_features("fluvius").to_parquet("./data/features/ifeel_features_fluvius2.parquet")   
+
 if __name__ == '__main__':
     # Process features, parallel=False/True
-    #process_irish_features(True)
-    #process_london_features(True)
-    #process_australian_features(True)
+    process_irish_features(True)
+    process_london_features(True)
+    process_australian_features(True)
     process_bdg2_features(True)
     process_chp_features(True) 
+    process_fluvius_features(True)
