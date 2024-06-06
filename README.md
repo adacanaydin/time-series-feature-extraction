@@ -1,7 +1,7 @@
 # Time Series Feature Extraction
 
 This repository contains scripts for extracting time series features using two methods: Nixtla features (domain-agnostic) and IFEEL features (domain-informed).
-
+You can find the paper, which investigates different interpretable time series feature extraction methods, here (https://www.sciencedirect.com/science/article/abs/pii/S0306261924001247).
 ## Overview
 
 **Nixtla Features (Domain-Agnostic):** Extracts a set of features from time series data that are domain-agnostic, suitable for a wide range of applications.
